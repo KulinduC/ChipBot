@@ -130,8 +130,6 @@ async def harvest(page):
             print("No valid 'Load more' link → finished.")
             break   
 
-        print("THIS IS NEXT PAGE",next_link)
-
         # Construct next page URL properly
         base = page.url.split("/" + USERNAME)[0]
         next_url = f"{base}/{USERNAME}{href}"
@@ -162,7 +160,7 @@ async def scrape_tweet(url, proxy=None):
             }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, proxy=proxy_config) # type: ignore[arg-type]
+        browser = await p.chromium.launch(headless=True, proxy=proxy_config) # type: ignore[arg-type]
         context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
         page = await context.new_page()
         await page.goto(url, timeout=15000)
@@ -185,7 +183,11 @@ if __name__ == "__main__":
         tweets = asyncio.run(scrape_tweet(url, proxy))
         print(f"\nCollected {len(tweets)} matching tweets\n")
 
-        text_file.write_text("\n\n".join(t["text"] for t in tweets), encoding="utf-8")
+        text_file.write_text(
+            "\n\n".join(f"{i+1}. {t['text']}" for i, t in enumerate(tweets) if not t["images"]),
+            encoding="utf-8"
+        )
+
         
         all_imgs = [img for t in tweets for img in t["images"]]
         image_file.write_text("\n".join(all_imgs), encoding="utf-8")
