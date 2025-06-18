@@ -1,12 +1,17 @@
-import time, random, pathlib, sys, re
+import time, random, pathlib, re, warnings
 import requests, undetected_chromedriver as uc
+from seleniumwire import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
+
+
+warnings.filterwarnings("ignore", category=UserWarning)
 
 USERNAME = "ChipotleTweets"
 URL = f"https://twiiit.com/{USERNAME}"
 PROXY_FILE = "proxies.txt"
-
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -30,7 +35,6 @@ CF_RE = re.compile(r"(verify you are human|just a moment|cdn-cgi/challenge)", re
 def blocked_by_cloudflare(html: str) -> bool:
     return bool(CF_RE.search(html))
 
-
 def get_random_headers():
     return {
         "User-Agent": random.choice(USER_AGENTS),
@@ -42,13 +46,11 @@ def get_random_headers():
         "Upgrade-Insecure-Requests": "1"
     }
 
-
 def load_proxies():
     path = pathlib.Path(PROXY_FILE)
     if not path.exists():
         return []
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
-
 
 def instance_count() -> int:
     try:
@@ -61,77 +63,82 @@ def instance_count() -> int:
         pass
     return 0
 
-
 def nitter_instance():
     proxies = load_proxies()
     inst_max = instance_count()
     print(f"Twiiit reports {inst_max} instances online")
 
-    # helper to get redirect (optionally through proxy)
     def twiiit_redirect(proxy=None):
-        resp = requests.get(URL, headers=get_random_headers(),
-                            allow_redirects=False,
-                            proxies=proxy, timeout=10)
-        return resp.headers.get("Location")
+        try:
+            resp = requests.get(
+                URL,
+                headers=get_random_headers(),
+                allow_redirects=False,
+                proxies={"http": proxy, "https": proxy} if proxy else None,
+                timeout=10
+            )
+            return resp.headers.get("Location")
+        except Exception as e:
+            print(f"twiiit_redirect failed: {e}")
+            return None
 
-    # helper to test an instance via requests
     def page_ok(u, proxy=None):
-        r = requests.get(u, headers=get_random_headers(),
-                         proxies=proxy, timeout=10)
-        return (r.status_code == 200 and not blocked_by_cloudflare(r.text))
-
+        try:
+            resp = requests.get(
+                u,
+                headers=get_random_headers(),
+                proxies={"http": proxy, "https": proxy} if proxy else None,
+                timeout=10
+            )
+            return resp.status_code == 200 and not blocked_by_cloudflare(resp.text)
+        except Exception as e:
+            print(f"page_ok failed: {e}")
+            return False
 
     tried = set()
-    for _ in range(inst_max):
-        inst = twiiit_redirect()
-        if not inst or inst in tried:
-            continue
-        tried.add(inst)
-        try:
-            if page_ok(inst):
-                return inst, None
-        except Exception:
-            pass
-        if len(tried) >= inst_max:
-            break
-
     for proxy in proxies:
-        proxy_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
         tried.clear()
         for _ in range(inst_max):
-            inst = twiiit_redirect(proxy_dict)
+            inst = twiiit_redirect(proxy)
             if not inst or inst in tried:
                 continue
             tried.add(inst)
-            try:
-                if page_ok(inst, proxy_dict):
-                    return inst, proxy
-            except Exception:
-                pass
+            if page_ok(inst, proxy):
+                return inst, proxy
             if len(tried) >= inst_max:
                 break
 
     raise RuntimeError("No Nitter instance could bypass Cloudflare")
 
-
 def scrape_tweet(url, proxy=None):
-    host = url.split('/')[2]
     print(f"Launching headless browser → {url} (proxy={proxy})")
 
-    opts = uc.ChromeOptions()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--window-size=1280,800")
-    opts.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
-    if proxy:
-        opts.add_argument(f"--proxy-server=http://{proxy}")
+    options = uc.ChromeOptions()
+    options.add_argument("--disable-gpu")
+    #options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--window-size=1280,800")
+    options.add_argument("--log-level=3")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-infobars")
 
-    driver = uc.Chrome(options=opts)
+    seleniumwire_options = {
+        "proxy": {
+            "http": proxy,
+            "https": proxy,
+            "no_proxy": "localhost,127.0.0.1"
+        }
+    }
+
+    driver = webdriver.Chrome(options=options, seleniumwire_options=seleniumwire_options)
     try:
         driver.get(url)
         time.sleep(5)
 
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.timeline-item"))
+        )
         tweets = driver.find_elements(By.CSS_SELECTOR, "div.timeline-item")
         if not tweets:
             raise Exception("No tweets found")
@@ -144,14 +151,13 @@ def scrape_tweet(url, proxy=None):
         else:
             tweet = tweets[0]
 
-        tweet_text = tweet.find_element(
-            By.CSS_SELECTOR, "div.tweet-content.media-body").text.strip()
+        tweet_text = tweet.find_element(By.CSS_SELECTOR, "div.tweet-content.media-body").text.strip()
 
         images = []
-        for a in tweet.find_elements(By.CSS_SELECTOR, "a.still-image"):
-            href = a.get_attribute("href")
-            if href and href.startswith("/pic/"):
-                images.append(f"https://{host}{href}")
+        for img in tweet.find_elements(By.CSS_SELECTOR, "img"):
+            src = img.get_attribute("src")
+            if src and "/pic/" in src and "profile_images" not in src:
+                images.append(src)
 
         return {"text": tweet_text, "images": images}
 
@@ -161,14 +167,15 @@ def scrape_tweet(url, proxy=None):
         except Exception:
             pass
 
-
 if __name__ == "__main__":
-    print(load_proxies())
     try:
         url, px = nitter_instance()
-        tw   = scrape_tweet(url, proxy=px)
+        tw = scrape_tweet(url, proxy=px)
         print("\nLATEST TWEET:\n")
         print(tw["text"])
-        print(tw["images"])
+        if tw["images"]:
+            print(tw["images"])
+        else:
+            print("No images")
     except Exception as e:
         print(f"Error: {e}")
