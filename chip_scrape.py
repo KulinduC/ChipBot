@@ -80,6 +80,7 @@ def nitter_instance():
 
 
 async def harvest(page):
+    host = url.split('/')[2]
     results, seen = [] , set()
 
     for tweet in await page.query_selector_all("div.timeline-item"):
@@ -98,7 +99,7 @@ async def harvest(page):
         for img in await tweet.query_selector_all("img"):
                 src = await img.get_attribute("src")
                 if src and "/pic/" in src and "profile_images" not in src:
-                    images.append(src)
+                    images.append("https://"+host+src)
         results.append({"text": text, "images": images})
 
         await page.mouse.wheel(0, 2000)
@@ -128,7 +129,7 @@ async def scrape_tweet(url, proxy=None):
             }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, proxy=proxy_config)
+        browser = await p.chromium.launch(headless=True, proxy=proxy_config)
         context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
         page = await context.new_page()
         await page.goto(url, timeout=15000)
@@ -152,7 +153,9 @@ if __name__ == "__main__":
         print(f"\nCollected {len(tweets)} matching tweets\n")
 
         text_file.write_text("\n\n".join(t["text"] for t in tweets), encoding="utf-8")
-        image_file.write_text("\n\n".join(t["images"] for t in tweets), encoding="utf-8")
+        
+        all_imgs = [img for t in tweets for img in t["images"]]
+        image_file.write_text("\n".join(all_imgs), encoding="utf-8")
 
     except Exception as e:
         print("Error:", e)
