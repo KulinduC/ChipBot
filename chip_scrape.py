@@ -83,9 +83,12 @@ async def harvest(page):
     results, seen = [], set()
 
     async def extract():
-        nonlocal results
+        nonlocal results, seen
+
         for tw in await page.query_selector_all("div.timeline-item"):
-            tid = await tw.get_attribute("data-id") or id(tw)
+            content = await tw.inner_text()
+            tid = hash(content.strip())
+
             if tid in seen:
                 continue
             seen.add(tid)
@@ -103,38 +106,43 @@ async def harvest(page):
                     imgs.append(f"https://{base}{src}")
             results.append({"text": text, "images": imgs})
 
-            if len(results) >= 100:
+            if len(results) >= 50:
                 return True
 
         return False
-
     while True:
         stop = await extract()
-        print(f"Collected {len(results):>4} tweets so far")
+        print(f"Collected {len(results)} tweets so far")
+
         if stop:
             break
 
-        btn = await page.query_selector("a.show-more, button:has-text('Load more')")
-        if btn:
-            await btn.scroll_into_view_if_needed()
-            await btn.click()
-            try:
-                await page.wait_for_function(
-                    """() => !document.querySelector("a.show-more, button:has-text('Load more')")
-                           || document.querySelectorAll('div.timeline-item').length > arguments[0]""",
-                    len(seen),
-                    timeout=10_000
-                )
-            except PWTimeout:
+        # Find the “Load more”/pagination link
+        links = await page.query_selector_all("a[href*='cursor=']")
+        next_link = None
+        for link in links:
+            href = await link.get_attribute("href")
+            if href and "newest" not in href.lower():
+                next_link = href
                 break
-        else:
-            prev = len(seen)
-            await page.mouse.wheel(0, 3000)
-            await page.wait_for_timeout(800)
-            stop = await extract()
-            print(f"Collected {len(results):>4} tweets so far")
-            if stop or len(seen) == prev:
-                break
+
+        if not next_link:
+            print("No valid 'Load more' link → finished.")
+            break   
+
+        print("THIS IS NEXT PAGE",next_link)
+
+        # Construct next page URL properly
+        base = page.url.split("/" + USERNAME)[0]
+        next_url = f"{base}/{USERNAME}{href}"
+        print("Navigating to", next_url)
+
+        try:
+            await page.goto(next_url, timeout=15_000, wait_until="domcontentloaded")
+            await page.wait_for_selector("div.timeline-item", timeout=10_000)
+        except PWTimeout:
+            print("Timed out loading next page → stopping.")
+            break
 
     return results
 
@@ -154,7 +162,7 @@ async def scrape_tweet(url, proxy=None):
             }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, proxy=proxy_config)
+        browser = await p.chromium.launch(headless=False, proxy=proxy_config) # type: ignore[arg-type]
         context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
         page = await context.new_page()
         await page.goto(url, timeout=15000)
