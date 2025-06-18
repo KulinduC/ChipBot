@@ -183,8 +183,9 @@ if __name__ == "__main__":
         tweets = asyncio.run(scrape_tweet(url, proxy))
         print(f"\nCollected {len(tweets)} matching tweets\n")
 
+        filtered = [t for t in tweets if not t["images"]]
         text_file.write_text(
-            "\n\n".join(f"{i+1}. {t['text']}" for i, t in enumerate(tweets) if not t["images"]),
+            "\n\n".join(f"{i+1}. {t['text']}" for i, t in enumerate(filtered)),
             encoding="utf-8"
         )
 
