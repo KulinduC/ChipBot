@@ -80,39 +80,64 @@ def nitter_instance():
 
 
 async def harvest(page):
-    host = url.split('/')[2]
-    results, seen = [] , set()
+    results, seen = [], set()
 
-    for tweet in await page.query_selector_all("div.timeline-item"):
-        tid = id(tweet)
-        if tid in seen: 
-            continue
-        seen.add(tid)
-        
+    async def extract():
+        nonlocal results
+        for tw in await page.query_selector_all("div.timeline-item"):
+            tid = await tw.get_attribute("data-id") or id(tw)
+            if tid in seen:
+                continue
+            seen.add(tid)
 
-        tweet_text = await tweet.query_selector("div.tweet-content.media-body")
-        text = (await tweet_text.inner_text()).strip() if tweet_text else ""
-        if not PATTERN.search(text):
-            continue
+            body = await tw.query_selector("div.tweet-content.media-body")
+            text = (await body.inner_text()).strip() if body else ""
+            if not PATTERN.search(text):
+                continue
 
-        images = []
-        for img in await tweet.query_selector_all("img"):
+            imgs = []
+            for img in await tw.query_selector_all("img"):
                 src = await img.get_attribute("src")
                 if src and "/pic/" in src and "profile_images" not in src:
-                    images.append("https://"+host+src)
-        results.append({"text": text, "images": images})
+                    base = page.url.split("/")[2]
+                    imgs.append(f"https://{base}{src}")
+            results.append({"text": text, "images": imgs})
 
-        await page.mouse.wheel(0, 2000)
+            if len(results) >= 100:
+                return True
 
-        try:
-            btn = await page.wait_for_selector(
-                "a.show-more, button:has-text('Load more')", timeout=1500
-            )
-            await btn.click()
-        except PWTimeout:
+        return False
+
+    while True:
+        stop = await extract()
+        print(f"Collected {len(results):>4} tweets so far")
+        if stop:
             break
 
+        btn = await page.query_selector("a.show-more, button:has-text('Load more')")
+        if btn:
+            await btn.scroll_into_view_if_needed()
+            await btn.click()
+            try:
+                await page.wait_for_function(
+                    """() => !document.querySelector("a.show-more, button:has-text('Load more')")
+                           || document.querySelectorAll('div.timeline-item').length > arguments[0]""",
+                    len(seen),
+                    timeout=10_000
+                )
+            except PWTimeout:
+                break
+        else:
+            prev = len(seen)
+            await page.mouse.wheel(0, 3000)
+            await page.wait_for_timeout(800)
+            stop = await extract()
+            print(f"Collected {len(results):>4} tweets so far")
+            if stop or len(seen) == prev:
+                break
+
     return results
+
 
 
 async def scrape_tweet(url, proxy=None):
