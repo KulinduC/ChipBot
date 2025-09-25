@@ -37,25 +37,6 @@ def load_proxies():
         return []
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
-# def instance_count() -> int:
-#     try:
-#         resp = requests.get("https://twiiit.com/", headers=headers(), timeout=8)
-#         soup = BeautifulSoup(resp.text, "html.parser")
-#         m = re.search(r"currently\s+(\d+)\s+instances", soup.get_text(" ", strip=True), re.I)
-#         if m:
-#             return int(m.group(1))
-#     except Exception:
-#         pass
-#     return 0
-
-# def redirect_instance(url,proxy=None):
-#     try:
-#         resp = requests.get(url, headers=headers(), allow_redirects=False,
-#                             proxies={"http": proxy, "https": proxy} if proxy else None, timeout=10)
-#         return resp.headers.get("Location")
-#     except Exception as e:
-#         print(f"twiiit_redirect failed: {e}")
-#         return None
 
 def page_ok(url, proxy=None):
     try:
