@@ -1,8 +1,10 @@
 import asyncio, random, pathlib, re
 import requests
-from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from urllib.parse import urljoin
+from paddleocr import PaddleOCR
+import tempfile
+import os
 
 
 CF_RE = re.compile(r"(verify you are human|just a moment|cdn-cgi/challenge)", re.I)
@@ -20,6 +22,8 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
     "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
 ]
+
+ocr = None
 
 def blocked(html: str) -> bool:
     return bool(CF_RE.search(html))
@@ -67,6 +71,66 @@ def nitter_instance():
     return None, None
 
 
+def get_ocr():
+    global ocr
+    if ocr is None:
+        ocr = PaddleOCR(use_angle_cls=True, lang='en')
+    return ocr
+
+
+async def extract_image_text(image_url):
+    try:
+        # Download the image
+        response = requests.get(image_url, headers=headers(), timeout=10)
+        if response.status_code != 200:
+            return ""
+
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+            tmp_file.write(response.content)
+            tmp_path = tmp_file.name
+
+        # Extract text using PaddleOCR
+        ocr_reader = get_ocr()
+        result = ocr_reader.predict(tmp_path)
+        print(f"OCR result for {image_url}: {result}")
+
+        os.unlink(tmp_path)
+
+        text_array = []
+        if result and result[0]:
+            for line in result[0]:
+                if line:
+                    text_array.append(line[1][0])
+
+        image_text = " ".join(text_array)
+
+        return image_text
+
+    except Exception as e:
+        print(f"OCR failed for {image_url}: {e}")
+        return ""
+
+
+async def extract_poll(tweet):
+    poll_content = []
+
+    # Look for poll container
+    poll_element = await tweet.query_selector("div.poll")
+    if not poll_element:
+        return None
+
+    # Extract all poll-choice-option values
+    poll_options = await poll_element.query_selector_all("span.poll-choice-option")
+
+    for option in poll_options:
+        option_text = (await option.inner_text()).strip()
+        if option_text:
+            poll_content.append(option_text)
+
+    return " ".join(poll_content) if poll_content else None
+
+
 async def harvest(page):
     results, seen = [], set()
 
@@ -83,15 +147,33 @@ async def harvest(page):
 
             body = await tweet.query_selector("div.tweet-content.media-body")
             text = (await body.inner_text()).strip() if body else ""
+
+            # Check for poll content and append it to the text
+
             if not PATTERN.search(text):
                 continue
+
+            poll_content = await extract_poll(tweet)
+            if poll_content:
+                text += " " + poll_content
 
             imgs = []
             for img in await tweet.query_selector_all("img"):
                 src = await img.get_attribute("src")
                 if src and "/pic/" in src and "profile_images" not in src:
                     base = page.url.split("/")[2]
-                    imgs.append(f"https://{base}{src}")
+                    img_url = f"https://{base}{src}"
+                    imgs.append(img_url)
+
+                    # Extract text from image using OCR
+                    image_text = await extract_image_text(img_url)
+                    if image_text:
+                        text += " " + image_text
+
+            text = ''.join(char for char in text if char.isalnum() or char.isspace())
+            words = text.split()
+            text = ' '.join(words)
+
             results.append({"text": text, "images": imgs})
 
             if len(results) >= 50:
@@ -110,7 +192,6 @@ async def harvest(page):
         try:
             await page.wait_for_selector("div.show-more a[href*='cursor=']", timeout=5000)
         except:
-            # no 'Load more' with cursor found -> done
             break
 
         element = await page.query_selector("div.show-more a[href*='cursor=']")
@@ -146,7 +227,7 @@ async def scrape_tweet(url, proxy=None):
             }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, proxy=proxy_config)
+        browser = await p.chromium.launch(headless=True, proxy=proxy_config)
         context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
         page = await context.new_page()
         await page.goto(url, timeout=15000)
