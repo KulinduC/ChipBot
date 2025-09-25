@@ -2,13 +2,15 @@ import asyncio, random, pathlib, re
 import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from urllib.parse import urljoin
 
 
 CF_RE = re.compile(r"(verify you are human|just a moment|cdn-cgi/challenge)", re.I)
 PATTERN = re.compile(r"\bcodes avail\. US only, 13\+.*?terms", re.I)
 USERNAME = "ChipotleTweets"
-URL = f"https://twiiit.com/{USERNAME}"
 PROXY_FILE = "proxies.txt"
+
+URLS = ["xcancel.com", "nitter.poast.org", "nitter.privacyredirect.com", "lightbrd.com", "nitter.space", "nitter.tiekoetter.com", "nuku.trabun.org"]
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -35,29 +37,29 @@ def load_proxies():
         return []
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
-def instance_count() -> int:
-    try:
-        resp = requests.get("https://twiiit.com/", headers=headers(), timeout=8)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        m = re.search(r"currently\s+(\d+)\s+instances", soup.get_text(" ", strip=True), re.I)
-        if m:
-            return int(m.group(1))
-    except Exception:
-        pass
-    return 0
+# def instance_count() -> int:
+#     try:
+#         resp = requests.get("https://twiiit.com/", headers=headers(), timeout=8)
+#         soup = BeautifulSoup(resp.text, "html.parser")
+#         m = re.search(r"currently\s+(\d+)\s+instances", soup.get_text(" ", strip=True), re.I)
+#         if m:
+#             return int(m.group(1))
+#     except Exception:
+#         pass
+#     return 0
 
-def redirect_instance(proxy=None):
-    try:
-        resp = requests.get(URL, headers=headers(), allow_redirects=False,
-                            proxies={"http": proxy, "https": proxy} if proxy else None, timeout=10)
-        return resp.headers.get("Location")
-    except Exception as e:
-        print(f"twiiit_redirect failed: {e}")
-        return None
+# def redirect_instance(url,proxy=None):
+#     try:
+#         resp = requests.get(url, headers=headers(), allow_redirects=False,
+#                             proxies={"http": proxy, "https": proxy} if proxy else None, timeout=10)
+#         return resp.headers.get("Location")
+#     except Exception as e:
+#         print(f"twiiit_redirect failed: {e}")
+#         return None
 
-def page_ok(u, proxy=None):
+def page_ok(url, proxy=None):
     try:
-        resp = requests.get(u, headers=headers(), proxies={"http": proxy, "https": proxy} if proxy else None, timeout=10)
+        resp = requests.get(url, headers=headers(), proxies={"http": proxy, "https": proxy} if proxy else None, timeout=10)
         return resp.status_code == 200 and not blocked(resp.text)
     except Exception as e:
         print(f"page_ok failed: {e}")
@@ -65,18 +67,23 @@ def page_ok(u, proxy=None):
 
 def nitter_instance():
     proxies = load_proxies()
-    inst_max = instance_count()
-    print(f"Twiiit reports {inst_max} instances online")
 
-    for proxy in proxies:
-        tried = set()
-        for _ in range(inst_max):
-            inst = redirect_instance(proxy)
-            if inst and inst not in tried and page_ok(inst, proxy):
-                return inst, proxy
-            tried.add(inst)
+    if proxies:
+        for proxy in proxies:
+            for i in range(len(URLS)):
+                instance = "https://" +URLS[i] + "/" + USERNAME
+                if page_ok(instance, proxy):
+                    return instance, proxy
 
-    raise RuntimeError("No Nitter instance could bypass Cloudflare")
+        raise RuntimeError("No Nitter instance could bypass Cloudflare")
+
+    else:
+        for i in range(len(URLS)):
+            instance = "https://" + URLS[i] + "/" + USERNAME
+            if page_ok(instance, None):
+                return instance, None
+
+    return None, None
 
 
 async def harvest(page):
@@ -85,21 +92,21 @@ async def harvest(page):
     async def extract():
         nonlocal results, seen
 
-        for tw in await page.query_selector_all("div.timeline-item"):
-            content = await tw.inner_text()
+        for tweet in await page.query_selector_all("div.timeline-item"):
+            content = await tweet.inner_text()
             tid = hash(content.strip())
 
             if tid in seen:
                 continue
             seen.add(tid)
 
-            body = await tw.query_selector("div.tweet-content.media-body")
+            body = await tweet.query_selector("div.tweet-content.media-body")
             text = (await body.inner_text()).strip() if body else ""
             if not PATTERN.search(text):
                 continue
 
             imgs = []
-            for img in await tw.query_selector_all("img"):
+            for img in await tweet.query_selector_all("img"):
                 src = await img.get_attribute("src")
                 if src and "/pic/" in src and "profile_images" not in src:
                     base = page.url.split("/")[2]
@@ -108,8 +115,9 @@ async def harvest(page):
 
             if len(results) >= 50:
                 return True
-
         return False
+
+
     while True:
         stop = await extract()
         print(f"Collected {len(results)} tweets so far")
@@ -117,22 +125,20 @@ async def harvest(page):
         if stop:
             break
 
-        # Find the “Load more”/pagination link
-        links = await page.query_selector_all("a[href*='cursor=']")
-        next_link = None
-        for link in links:
-            href = await link.get_attribute("href")
-            if href and "newest" not in href.lower():
-                next_link = href
-                break
+        # Wait for the selector
+        try:
+            await page.wait_for_selector("div.show-more a[href*='cursor=']", timeout=5000)
+        except:
+            # no 'Load more' with cursor found -> done
+            break
 
-        if not next_link:
-            print("No valid 'Load more' link → finished.")
-            break   
+        element = await page.query_selector("div.show-more a[href*='cursor=']")
+        if not element:
+            break
 
-        # Construct next page URL properly
-        base = page.url.split("/" + USERNAME)[0]
-        next_url = f"{base}/{USERNAME}{href}"
+        href = await element.get_attribute("href")
+        next_url = urljoin(page.url, href)
+
         print("Navigating to", next_url)
 
         try:
@@ -143,7 +149,6 @@ async def harvest(page):
             break
 
     return results
-
 
 
 async def scrape_tweet(url, proxy=None):
@@ -160,7 +165,7 @@ async def scrape_tweet(url, proxy=None):
             }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, proxy=proxy_config) # type: ignore[arg-type]
+        browser = await p.chromium.launch(headless=False, proxy=proxy_config)
         context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
         page = await context.new_page()
         await page.goto(url, timeout=15000)
@@ -176,9 +181,8 @@ if __name__ == "__main__":
     image_file = pathlib.Path("image.txt")
     try:
         url, proxy = nitter_instance()
-        print("Using Nitter:", url)
+        print("Using instance:", url)
         if proxy: print("Through proxy:", proxy)
-
 
         tweets = asyncio.run(scrape_tweet(url, proxy))
         print(f"\nCollected {len(tweets)} matching tweets\n")
@@ -189,7 +193,7 @@ if __name__ == "__main__":
             encoding="utf-8"
         )
 
-        
+
         all_imgs = [img for t in tweets for img in t["images"]]
         image_file.write_text("\n".join(all_imgs), encoding="utf-8")
 
