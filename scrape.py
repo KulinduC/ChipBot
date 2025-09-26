@@ -2,7 +2,6 @@ import asyncio, random, pathlib, re
 import requests
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from urllib.parse import urljoin
-from paddleocr import PaddleOCR
 import tempfile
 import os
 
