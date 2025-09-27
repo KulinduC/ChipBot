@@ -1,3 +1,5 @@
 image.txt
 text.txt
 .DS_Store
+images/
+.env

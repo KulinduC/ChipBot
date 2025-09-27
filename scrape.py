@@ -2,8 +2,6 @@ import asyncio, random, pathlib, re
 import requests
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from urllib.parse import urljoin
-import tempfile
-import os
 
 
 CF_RE = re.compile(r"(verify you are human|just a moment|cdn-cgi/challenge)", re.I)
@@ -21,8 +19,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
     "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
 ]
-
-ocr = None
 
 def blocked(html: str) -> bool:
     return bool(CF_RE.search(html))
@@ -70,47 +66,6 @@ def nitter_instance():
     return None, None
 
 
-def get_ocr():
-    global ocr
-    if ocr is None:
-        ocr = PaddleOCR(use_angle_cls=True, lang='en')
-    return ocr
-
-
-async def extract_image_text(image_url):
-    try:
-        # Download the image
-        response = requests.get(image_url, headers=headers(), timeout=10)
-        if response.status_code != 200:
-            return ""
-
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
-            tmp_file.write(response.content)
-            tmp_path = tmp_file.name
-
-        # Extract text using PaddleOCR
-        ocr_reader = get_ocr()
-        result = ocr_reader.predict(tmp_path)
-        print(f"OCR result for {image_url}: {result}")
-
-        os.unlink(tmp_path)
-
-        text_array = []
-        if result and result[0]:
-            for line in result[0]:
-                if line:
-                    text_array.append(line[1][0])
-
-        image_text = " ".join(text_array)
-
-        return image_text
-
-    except Exception as e:
-        print(f"OCR failed for {image_url}: {e}")
-        return ""
-
-
 async def extract_poll(tweet):
     poll_content = []
 
@@ -132,9 +87,22 @@ async def extract_poll(tweet):
 
 async def harvest(page):
     results, seen = [], set()
+    imgs = set()  # Move imgs outside extract() function
+
+    # need to extract profile picture for each tweet, in case it changes
+    base = page.url.split("/")[2]
+    profile = await page.query_selector("div.profile-card")
+    if profile:
+        source = await profile.get_attribute("src")
+        if source and "/pic/" in source:
+            url = f"https://{base}{source}"
+            imgs.add(url)
+
+    bio = await page.query_selector("div.profile-bio")
+    bio_text = await bio.inner_text() if bio else ""
 
     async def extract():
-        nonlocal results, seen
+        nonlocal results, seen, imgs
 
         for tweet in await page.query_selector_all("div.timeline-item"):
             content = await tweet.inner_text()
@@ -149,34 +117,36 @@ async def harvest(page):
 
             # Check for poll content and append it to the text
 
+            # Check if this tweet matches the pattern
             if not PATTERN.search(text):
                 continue
 
+            # Found a matching tweet! Process it and return immediately
             poll_content = await extract_poll(tweet)
             if poll_content:
                 text += " " + poll_content
 
-            imgs = []
-            for img in await tweet.query_selector_all("img"):
-                src = await img.get_attribute("src")
-                if src and "/pic/" in src and "profile_images" not in src:
-                    base = page.url.split("/")[2]
-                    img_url = f"https://{base}{src}"
-                    imgs.append(img_url)
-
-                    # Extract text from image using OCR
-                    image_text = await extract_image_text(img_url)
-                    if image_text:
-                        text += " " + image_text
+            if bio_text:
+                text += " " + bio_text
 
             text = ''.join(char for char in text if char.isalnum() or char.isspace())
             words = text.split()
             text = ' '.join(words)
 
-            results.append({"text": text, "images": imgs})
+            # Collect images for this specific tweet only
+            tweet_imgs = []
+            for img in await tweet.query_selector_all("img"):
+                src = await img.get_attribute("src")
+                if src and "/pic/" in src and "profile_images" not in src:
+                    img_url = f"https://{base}{src}"
+                    if img_url not in imgs:
+                        imgs.add(img_url)
+                        tweet_imgs.append(img_url)
 
-            if len(results) >= 50:
-                return True
+            results.append({"text": text, "images": tweet_imgs})
+
+            # Return True immediately after finding the first matching tweet
+            return True
         return False
 
 
