@@ -2,8 +2,6 @@ import asyncio, aiohttp, xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 import re
 import os
-import time
-import random
 from azure.ai.inference import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
