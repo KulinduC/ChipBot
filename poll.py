@@ -2,6 +2,7 @@ import asyncio, aiohttp, xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 import re
 import os
+import time
 from azure.ai.inference import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
@@ -9,9 +10,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 PATTERN = re.compile(r"\bcodes avail\. US only, 13\+.*?terms", re.I)
-USERNAME = "smurfingarg"
+USERNAME = "ChipotleTweets"
 BASE     = "http://127.0.0.1:8081"
 URL = f"{BASE}/{USERNAME}"
+FEED = f"{URL}/rss"
 
 endpoint = "https://models.github.ai/inference"
 model = "meta/Llama-4-Scout-17B-16E-Instruct"
@@ -82,7 +84,8 @@ async def poll():
   async with aiohttp.ClientSession() as session:
     while True:
         try:
-          async with session.get(URL + "/rss") as resp:
+          # bypass cache per request using timestamp
+          async with session.get(f"{FEED}?_={int(time.time())}") as resp:
             resp.raise_for_status()
             xml = await resp.text()
             entry = await parse(xml, session)
