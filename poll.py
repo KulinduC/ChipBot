@@ -3,17 +3,19 @@ from bs4 import BeautifulSoup
 import re
 import os
 import time
+import random
 from azure.ai.inference import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
 from dotenv import load_dotenv
 
 load_dotenv()
-PATTERN = re.compile(r"\bcodes avail\. US only, 13\+.*?terms", re.I)
-USERNAME = "ChipotleTweets"
+PATTERN = re.compile(r"codes\s+avail\.?\s+US\s+only,\s*13\+", re.I)
+USERNAME = "smurfingarg"
 BASE     = "http://127.0.0.1:8081"
 URL = f"{BASE}/{USERNAME}"
 FEED = f"{URL}/rss"
+POLL_SEC = 1
 
 endpoint = "https://models.github.ai/inference"
 model = "meta/Llama-4-Scout-17B-16E-Instruct"
@@ -84,26 +86,26 @@ async def poll():
   async with aiohttp.ClientSession() as session:
     while True:
         try:
-          # bypass cache per request using timestamp
-          async with session.get(f"{FEED}?_={int(time.time())}") as resp:
+          async with session.get(FEED) as resp:
             resp.raise_for_status()
             xml = await resp.text()
             entry = await parse(xml, session)
             if not entry:
-              await asyncio.sleep(5); continue
+              await asyncio.sleep(POLL_SEC); continue
             if entry["id"] == last_id:
-              await asyncio.sleep(5); continue
+              await asyncio.sleep(POLL_SEC); continue
 
             last_id = entry["id"]
             text = entry["text"]
             images = entry["images"]
 
-            print("NEW TWEET:", text)
-            print("IMAGES:", images)
+            if PATTERN.search(text):
+              print("NEW TWEET:", text)
+              print("IMAGES:", images)
 
         except Exception as e:
             print("Error:", e)
-        await asyncio.sleep(5)
+        await asyncio.sleep(POLL_SEC)
 
 if __name__ == "__main__":
   asyncio.run(poll())
