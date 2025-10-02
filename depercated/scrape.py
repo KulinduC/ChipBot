@@ -146,7 +146,8 @@ async def harvest(page):
             results.append({"text": text, "images": tweet_imgs})
 
             # Return True immediately after finding the first matching tweet
-            return True
+            if len(results) >= 50:
+                return True
         return False
 
 
@@ -195,12 +196,12 @@ async def scrape_tweet(url, proxy=None):
                 "password": match.group("pwd")
             }
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, proxy=proxy_config)
-        context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-        page = await context.new_page()
-        await page.goto(url, timeout=15000)
-        await page.wait_for_selector("div.timeline-item", timeout=10000)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, proxy=proxy_config)
+            context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+            page = await context.new_page()
+            await page.goto(url, timeout=15000)
+            await page.wait_for_selector("div.timeline-item", timeout=10000)
 
         data = await harvest(page)
         await browser.close()

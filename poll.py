@@ -2,18 +2,41 @@ import asyncio, aiohttp, xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 import re
 import os
+import random
 from azure.ai.inference import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from dotenv import load_dotenv
 
 load_dotenv()
 PATTERN = re.compile(r"codes\s+avail\.?\s+US\s+only,\s*13\+", re.I)
 USERNAME = "smurfingarg"
-BASE     = "http://127.0.0.1:8081"
+#BASE     = "http://127.0.0.1:8081"
+BASE = "https://nitter.privacyredirect.com/"
 URL = f"{BASE}/{USERNAME}"
 FEED = f"{URL}/rss"
-POLL_SEC = 1
+POLL_SEC = 5
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13.5; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+]
+
+
+SYS_PROMPT = """Extract promotional codes from the text. Return ONLY the codes, separated by commas if multiple. If no codes found, return "None".
+
+Rules:
+- Codes are alphanumeric (mix of letters and numbers)
+- Ignore regular words, URLs, or menu items
+- Return codes exactly as they appear (preserve case)
+
+Examples of valid codes: HZD828, EXTRAGEC16M, FREEPLAYVBFBD2
+Examples of invalid codes: chipotlecomfreeplay, CHIPOTLE"""
 
 endpoint = "https://models.github.ai/inference"
 model = "meta/Llama-4-Scout-17B-16E-Instruct"
@@ -27,9 +50,10 @@ client = ChatCompletionsClient(
 last_id = None
 
 def abs_url(u: str) -> str:
+    nitter_base = "https://nitter.net"
     if not u: return ""
     if u.startswith("http://") or u.startswith("https://"): return u
-    return f"{BASE}{u}"
+    return f"{nitter_base}{u}"
 
 
 async def parse(xml_text, session):
@@ -46,6 +70,7 @@ async def parse(xml_text, session):
     return None
 
   tweet_id = item.findtext("guid") or ""
+  link = item.findtext("link") or ""
   description = item.findtext("description") or ""
 
   soup = BeautifulSoup(description, "html.parser")
@@ -54,11 +79,6 @@ async def parse(xml_text, session):
 
   if profile_img:
     images.append(abs_url(profile_img))
-
-  poll_options = [opt.get_text(strip=True) for opt in soup.select("span.poll-choice-option")]
-  poll = " ".join(poll_options) if poll_options else None
-
-  text += " " + poll if poll else ""
 
   async with session.get(URL) as resp:
       resp.raise_for_status()
@@ -76,10 +96,40 @@ async def parse(xml_text, session):
         images.append(banner_link)
 
 
-  return {"id": tweet_id, "text": text, "images": images}
+  return {"id": tweet_id, "text": text, "link": link, "images": images}
 
 
-async def poll():
+async def poll(link):
+    async with async_playwright() as p:
+      browser = await p.chromium.launch(headless=True)
+      context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+      page = await context.new_page()
+
+    try:
+      await page.goto(link, timeout=15000)
+      await page.wait_for_selector("div.tweet-body", timeout=10000)
+
+      poll_element = await page.query_selector("div.poll")
+      if not poll_element:
+        await browser.close()
+        return ""
+
+      poll_options = await poll_element.query_selector_all("span.poll-choice-option")
+      poll_content = []
+
+      for option in poll_options:
+          option_text = (await option.inner_text()).strip()
+          if option_text:
+              poll_content.append(option_text)
+
+      await browser.close()
+      return " ".join(poll_content) if poll_content else ""
+    except Exception as e:
+      print(f"Error getting poll data: {e}")
+      await browser.close()
+      return ""
+
+async def scrape():
   global last_id
   async with aiohttp.ClientSession() as session:
     while True:
@@ -94,16 +144,29 @@ async def poll():
               await asyncio.sleep(POLL_SEC); continue
 
             last_id = entry["id"]
+            link = entry["link"]
             text = entry["text"]
             images = entry["images"]
 
             if PATTERN.search(text):
-              print("NEW TWEET:", text)
-              print("IMAGES:", images)
+              text += " " + await poll(link)
+              text = "".join(char for char in text if char.isalnum() or char.isspace())
+              filtered_text = " ".join(text.split())
+
+              print(f"Filtered text: {filtered_text}")
+
+              response = client.complete(
+                model=model,
+                messages=[
+                    SystemMessage(SYS_PROMPT),
+                    UserMessage(f"Find the promotional code in the following text and/or images: {filtered_text}")
+                  ],
+              )
+              print(response.choices[0].message.content)
 
         except Exception as e:
             print("Error:", e)
         await asyncio.sleep(POLL_SEC)
 
 if __name__ == "__main__":
-  asyncio.run(poll())
+  asyncio.run(scrape())
