@@ -10,8 +10,9 @@ from dotenv import load_dotenv
 
 PATTERN = re.compile(r"codes\s+avail\.?\s+US\s+only,\s*13\+", re.I)
 USERNAME = "smurfingarg"
-#BASE     = "http://127.0.0.1:8081"
-BASE = "https://nitter.privacyredirect.com/"
+
+# Use local Nitter instance from environment variable
+BASE = "http://localhost:8080"
 URL = f"{BASE}/{USERNAME}"
 FEED = f"{URL}/rss"
 POLL_SEC = 5
