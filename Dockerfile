@@ -28,9 +28,6 @@ RUN pip install -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create logs directory
-RUN mkdir -p /app/logs
-
 # Expose ports
 EXPOSE 8080 3000
 
