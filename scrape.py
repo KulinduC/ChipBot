@@ -1,15 +1,13 @@
 import asyncio, aiohttp, xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 import re
-import os
 import random
-from azure.ai.inference import ChatCompletionsClient
-from azure.ai.inference.models import SystemMessage, UserMessage
-from azure.core.credentials import AzureKeyCredential
+import os
+from openai import OpenAI
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from dotenv import load_dotenv
 
-load_dotenv()
+
 PATTERN = re.compile(r"codes\s+avail\.?\s+US\s+only,\s*13\+", re.I)
 USERNAME = "smurfingarg"
 #BASE     = "http://127.0.0.1:8081"
@@ -27,26 +25,8 @@ USER_AGENTS = [
     "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
 ]
 
-
-SYS_PROMPT = """Extract promotional codes from the text. Return ONLY the codes, separated by commas if multiple. If no codes found, return "None".
-
-Rules:
-- Codes are alphanumeric (mix of letters and numbers)
-- Ignore regular words, URLs, or menu items
-- Return codes exactly as they appear (preserve case)
-
-Examples of valid codes: HZD828, EXTRAGEC16M, FREEPLAYVBFBD2
-Examples of invalid codes: chipotlecomfreeplay, CHIPOTLE"""
-
-endpoint = "https://models.github.ai/inference"
-model = "meta/Llama-4-Scout-17B-16E-Instruct"
-token = os.environ["GITHUB_TOKEN"]
-
-client = ChatCompletionsClient(
-    endpoint=endpoint,
-    credential=AzureKeyCredential(token),
-)
-
+load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 last_id = None
 
 def abs_url(u: str) -> str:
@@ -129,7 +109,7 @@ async def poll(link):
       await browser.close()
       return ""
 
-async def scrape():
+async def scrape(code_queue):
   global last_id
   async with aiohttp.ClientSession() as session:
     while True:
@@ -154,19 +134,27 @@ async def scrape():
               filtered_text = " ".join(text.split())
 
               print(f"Filtered text: {filtered_text}")
+              content = [
+                {"type": "text", "text": f"Extract promotional codes from the text and/or images. Return ONLY the code(s) separated by commas if there are multiple. If no codes found, return 'None'. Text: {filtered_text}"}
+              ]
 
-              response = client.complete(
-                model=model,
-                messages=[
-                    SystemMessage(SYS_PROMPT),
-                    UserMessage(f"Find the promotional code in the following text and/or images: {filtered_text}")
-                  ],
+              for img_url in images:
+                if img_url:
+                  content.append({
+                    "type": "image_url",
+                    "image_url": {"url": img_url}
+                  })
+
+              response = client.responses.create(
+                model="gpt-5-nano",
+                messages=[{
+                  "role": "user",
+                  "content": content
+                }],
               )
-              print(response.choices[0].message.content)
+              await code_queue.put(response.output_text)
+
 
         except Exception as e:
             print("Error:", e)
         await asyncio.sleep(POLL_SEC)
-
-if __name__ == "__main__":
-  asyncio.run(scrape())
